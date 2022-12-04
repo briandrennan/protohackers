@@ -1,8 +1,7 @@
 ﻿// See https://aka.ms/new-console-template for more information
-using System.Buffers;
+using System.IO.Pipelines;
 using System.Net;
 using System.Net.Sockets;
-using System.Text;
 
 Console.WriteLine("0. Smoke Test");
 
@@ -33,27 +32,66 @@ catch (OperationCanceledException)
 
 async Task HandleEchoAsync(Socket client, CancellationTokenSource cts)
 {
-    var buffer = ArrayPool<byte>.Shared.Rent(1024);
+    var pipe = new Pipe();
+    var writer = pipe.Writer;
+    var reader = pipe.Reader;
+    var bytesTransferred = 0;
+    var address = client.RemoteEndPoint;
+
     try
     {
-        var memory = buffer.AsMemory();
-        var bytesTransfered = await client.ReceiveAsync(memory, cts.Token).ConfigureAwait(false);
+        var totalLength = 0;
 
-        var send = memory[..bytesTransfered];
-        var clientMessage = Encoding.ASCII.GetString(send.ToArray());
-        Console.WriteLine("- {0}: received {1}", client.RemoteEndPoint, clientMessage);
-        await client.SendAsync(send, cts.Token).ConfigureAwait(false);
-        Console.WriteLine("- {0}: sent {1}", client.RemoteEndPoint, clientMessage);
-        var address = client.RemoteEndPoint;
+        while (true)
+        {
+            var memory = writer.GetMemory(256);
+            bytesTransferred = await client.ReceiveAsync(memory, cts.Token).ConfigureAwait(false);
+            totalLength += bytesTransferred;
+
+            Console.WriteLine("- {0}: received chunk of length {1}", address, bytesTransferred);
+            writer.Advance(bytesTransferred);
+
+            if (bytesTransferred < memory.Length)
+            {
+                break;
+            }
+        }
+        writer.Complete();
+
+        var readResult = await reader.ReadAsync(cts.Token).ConfigureAwait(false);
+        if (readResult.IsCanceled)
+        {
+            return;
+        }
+
+        var buffer = readResult.Buffer;
+        SequencePosition consumed = buffer.Start;
+        var totalSent = 0;
+        while (true)
+        {
+            if (buffer.TryGet(ref consumed, out var memory, advance: true))
+            {
+                await client.SendAsync(memory, cts.Token).ConfigureAwait(false);
+                totalSent += memory.Length;
+                Console.WriteLine("- {0}: sent chunk {1} ({2}/{3})", address, memory.Length, totalSent, totalLength);
+            }
+            else
+            {
+                break;
+            }
+        }
+
         await client.DisconnectAsync(true, cts.Token).ConfigureAwait(false);
         Console.WriteLine("- {0}: (disconnected)", address);
     }
+    catch (Exception ex)
+    {
+        writer.Complete(ex);
+        reader.Complete(ex);
+    }
     finally
     {
-        if (!cts.IsCancellationRequested)
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
-        }
+        reader.Complete();
     }
 }
 

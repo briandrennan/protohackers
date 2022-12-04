@@ -32,12 +32,22 @@ else
     Console.WriteLine("Send: {0}", message);
 }
 
-var bytes = Encoding.ASCII.GetBytes(message!);
+var messageBytes = Encoding.UTF8.GetBytes(message!);
 
-await server.SendAsync(bytes).ConfigureAwait(false);
+await server.SendAsync(messageBytes).ConfigureAwait(false);
 var buffer = new ArraySegment<byte>(new byte[4096]);
-var response = server.ReceiveAsync(buffer).ConfigureAwait(false);
-message = Encoding.ASCII.GetString(buffer);
-Console.WriteLine("Response: {0}", message);
+
+var totalSent = messageBytes.Length;
+var receivedTotal = 0;
+
+while (receivedTotal < totalSent)
+{
+    var response = await server.ReceiveAsync(buffer).ConfigureAwait(false);
+    receivedTotal += response;
+    message = Encoding.UTF8.GetString(buffer);
+    Console.Write("Response: {0}", message);
+}
+
+Console.WriteLine();
 
 return 0;
