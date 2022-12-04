@@ -32,7 +32,7 @@ catch (OperationCanceledException)
 
 async Task HandleEchoAsync(Socket client, CancellationTokenSource cts)
 {
-    var pipe = new Pipe();
+    var pipe = new Pipe(new PipeOptions());
     var writer = pipe.Writer;
     var reader = pipe.Reader;
     var bytesTransferred = 0;
@@ -44,7 +44,7 @@ async Task HandleEchoAsync(Socket client, CancellationTokenSource cts)
 
         while (true)
         {
-            var memory = writer.GetMemory(256);
+            var memory = writer.GetMemory();
             bytesTransferred = await client.ReceiveAsync(memory, cts.Token).ConfigureAwait(false);
             totalLength += bytesTransferred;
 
