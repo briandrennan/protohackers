@@ -22,7 +22,10 @@ try
     {
         var client = await server.AcceptAsync(cts.Token).ConfigureAwait(false);
         Console.WriteLine("Connection received from client {0}", client.RemoteEndPoint);
-        await HandleEchoAsync(client, cts).ConfigureAwait(false);
+        var pipe = new Pipe();
+        var readTask = ReadData(client, pipe.Writer, cts.Token);
+        var sendTask = SendData(client, pipe.Reader, cts.Token);
+        await Task.WhenAll(readTask, sendTask).ConfigureAwait(false);
     }
 }
 catch (OperationCanceledException)
@@ -30,50 +33,27 @@ catch (OperationCanceledException)
     Console.WriteLine("Shutting down.");
 }
 
-async Task HandleEchoAsync(Socket client, CancellationTokenSource cts)
+async Task SendData(Socket client, PipeReader reader, CancellationToken token)
 {
-    var pipe = new Pipe(new PipeOptions());
-    var writer = pipe.Writer;
-    var reader = pipe.Reader;
-    var bytesTransferred = 0;
-    var address = client.RemoteEndPoint;
-
     try
     {
-        var totalLength = 0;
-
-        while (true)
-        {
-            var memory = writer.GetMemory();
-            bytesTransferred = await client.ReceiveAsync(memory, cts.Token).ConfigureAwait(false);
-            totalLength += bytesTransferred;
-
-            Console.WriteLine("- {0}: received chunk of length {1}", address, bytesTransferred);
-            writer.Advance(bytesTransferred);
-
-            if (bytesTransferred < memory.Length)
-            {
-                break;
-            }
-        }
-        writer.Complete();
-
-        var readResult = await reader.ReadAsync(cts.Token).ConfigureAwait(false);
+        var readResult = await reader.ReadAsync(token).ConfigureAwait(false);
         if (readResult.IsCanceled)
         {
+            reader.Complete();
             return;
         }
 
         var buffer = readResult.Buffer;
-        SequencePosition consumed = buffer.Start;
-        var totalSent = 0;
+        var position = buffer.Start;
+        var total = 0;
         while (true)
         {
-            if (buffer.TryGet(ref consumed, out var memory, advance: true))
+            if (buffer.TryGet(ref position, out var memory, advance: true))
             {
-                await client.SendAsync(memory, cts.Token).ConfigureAwait(false);
-                totalSent += memory.Length;
-                Console.WriteLine("- {0}: sent chunk {1} ({2}/{3})", address, memory.Length, totalSent, totalLength);
+                var transferred = await client.SendAsync(memory, token).ConfigureAwait(false);
+                total += transferred;
+                Console.WriteLine("- {0}: sent {1} bytes ({2} total)", client.RemoteEndPoint, transferred, total);
             }
             else
             {
@@ -81,17 +61,44 @@ async Task HandleEchoAsync(Socket client, CancellationTokenSource cts)
             }
         }
 
-        await client.DisconnectAsync(true, cts.Token).ConfigureAwait(false);
-        Console.WriteLine("- {0}: (disconnected)", address);
+        reader.Complete();
+        await client.DisconnectAsync(true, token).ConfigureAwait(false);
+        Console.WriteLine("- {0}: (disconnected)", client.RemoteEndPoint);
+    }
+    catch (Exception ex)
+    {
+        reader.Complete(ex);
+    }
+}
+
+async Task ReadData(Socket client, PipeWriter writer, CancellationToken token)
+{
+    var totalLength = 0;
+    var address = client.RemoteEndPoint;
+
+    try
+    {
+        while (true)
+        {
+            var memory = writer.GetMemory();
+            var bytesTransferred = await client.ReceiveAsync(memory, token).ConfigureAwait(false);
+            totalLength += bytesTransferred;
+
+            Console.WriteLine("- {0}: received chunk of length {1}", address, bytesTransferred);
+            writer.Advance(bytesTransferred);
+
+            // This indicates that the client transferred less memory than we had capacity to read,
+            // ergo, the client is done transmitting to us.
+            if (bytesTransferred < memory.Length)
+            {
+                break;
+            }
+        }
+        writer.Complete();
     }
     catch (Exception ex)
     {
         writer.Complete(ex);
-        reader.Complete(ex);
-    }
-    finally
-    {
-        reader.Complete();
     }
 }
 
